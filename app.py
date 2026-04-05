@@ -2033,6 +2033,13 @@ Please:
 6. Include guidance on how to actually make the donation"""
 
             st.session_state.messages = [{"role": "user", "content": structured_prompt}]
+            # Save giving profile to database
+            if st.session_state.user_id:
+                st.session_state.db.update_giving_profile(st.session_state.user_id, {
+                    "causes": causes_text, "cause_codes": cause_codes,
+                    "budget": budget, "geography": geo_text,
+                    "philosophy": philosophy, "experience": experience,
+                })
             st.rerun()
         
         # Show results below the form if they exist
@@ -2223,6 +2230,9 @@ Please:
                 response = run_agent(st.session_state.messages[-1]["content"], SYSTEM_PROMPT)
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
+                # Save conversation to database
+                if st.session_state.user_id:
+                    st.session_state.db.save_conversation(st.session_state.user_id, "donor", st.session_state.messages)
             st.rerun()
 
 
@@ -2295,6 +2305,13 @@ Use your tools to verify health data, check evidence, benchmark costs, and ident
             if response and "rate_limit" not in response.lower() and "Error" not in response[:20]:
                 status.update(label="Agentic evaluation complete", state="complete")
                 st.session_state.eval_result = response
+                # Save to database
+                if st.session_state.user_id:
+                    st.session_state.db.save_evaluation(
+                        st.session_state.user_id, "Uploaded proposal", truncated[:500],
+                        "auto-detected", "auto-detected", "See evaluation",
+                        response, st.session_state.tool_calls_log
+                    )
                 agentic_success = True
                 st.rerun()
             else:
@@ -2357,6 +2374,13 @@ Structured evaluation: (1) Executive summary, (2) Evidence alignment, (3) Data v
                     result_text = "".join([b.text for b in resp.content if hasattr(b, 'text')])
                     status.update(label="Evaluation complete (pre-fetch mode)", state="complete")
                     st.session_state.eval_result = result_text
+                    # Save to database
+                    if st.session_state.user_id:
+                        st.session_state.db.save_evaluation(
+                            st.session_state.user_id, "Uploaded proposal", truncated[:500],
+                            "auto-detected", "auto-detected", "See evaluation",
+                            result_text, []
+                        )
                     st.rerun()
                 except Exception as e2:
                     status.update(label="Evaluation failed", state="error")
@@ -2452,7 +2476,11 @@ def render_portfolio_mode():
         
         if st.button("💾 Save portfolio", type="primary"):
             st.session_state.portfolio_grants = new_grants
-            st.success(f"Portfolio saved: {len(new_grants)} grants")
+            if st.session_state.user_id:
+                st.session_state.db.save_portfolio(st.session_state.user_id, new_grants)
+                st.success(f"Portfolio saved: {len(new_grants)} grants (persisted)")
+            else:
+                st.success(f"Portfolio saved: {len(new_grants)} grants (enter email to persist)")
         
         if st.session_state.portfolio_grants:
             st.markdown("---")
@@ -2561,6 +2589,12 @@ Provide a structured analysis:
                 status_display.update(label="Analysis complete", state="complete")
                 
                 st.session_state.portfolio_reports[selected_grant] = result
+                # Save to database
+                if st.session_state.user_id:
+                    st.session_state.db.save_report_analysis(
+                        st.session_state.user_id, "", selected_grant,
+                        truncated_report[:3000], result
+                    )
                 st.markdown("### Report analysis")
                 st.markdown(result)
             except Exception as e:
@@ -2627,6 +2661,9 @@ Provide a structured analysis:
                 response = run_agent(full_message, PORTFOLIO_PROMPT)
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
+                # Save conversation to database
+                if st.session_state.user_id:
+                    st.session_state.db.save_conversation(st.session_state.user_id, "portfolio", st.session_state.messages)
             st.rerun()
     
     # ── TAB 4: BOARD REPORT ──
@@ -2709,6 +2746,12 @@ Format the report as:
                 result = "".join([b.text for b in resp.content if hasattr(b, 'text')])
                 status_display.update(label="Board report complete", state="complete")
                 st.session_state.portfolio_result = result
+                # Save to database
+                if st.session_state.user_id:
+                    st.session_state.db.save_board_report(
+                        st.session_state.user_id, report_period, result,
+                        st.session_state.portfolio_grants
+                    )
                 st.markdown(f"### Board report — {report_period}")
                 st.markdown(result)
             except Exception as e:
