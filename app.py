@@ -2054,6 +2054,8 @@ Please:
                     response = run_agent(st.session_state.messages[-1]["content"], SYSTEM_PROMPT)
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
+                    if st.session_state.user_id:
+                        st.session_state.db.save_conversation(st.session_state.user_id, "donor", st.session_state.messages)
                 st.rerun()
             
             # Follow-up chat after recommendation
@@ -2185,6 +2187,8 @@ Please:
                     response = run_agent(st.session_state.messages[-1]["content"], SYSTEM_PROMPT)
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
+                    if st.session_state.user_id:
+                        st.session_state.db.save_conversation(st.session_state.user_id, "donor", st.session_state.messages)
                 st.rerun()
             
             if follow_up := st.chat_input("Ask a follow-up question...", key="impact_chat"):
