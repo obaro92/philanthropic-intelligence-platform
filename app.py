@@ -2376,7 +2376,7 @@ Use your tools to verify health data, check evidence, benchmark costs, and ident
         agentic_success = False
         try:
             status = st.status("🤖 Agentic evaluation (full tool use)...", state="running")
-            response = run_agent(eval_message, EVALUATION_PROMPT, max_iterations=6)
+            response = run_agent(eval_message, EVALUATION_PROMPT, max_iterations=8)
             if response and "rate_limit" not in response.lower() and "Error" not in response[:20]:
                 status.update(label="Agentic evaluation complete", state="complete")
                 st.session_state.eval_result = response
@@ -2733,7 +2733,7 @@ Provide a structured analysis:
             full_message = f"{portfolio_context}\n\nPROGRAM OFFICER'S QUESTION: {st.session_state.messages[-1]['content']}"
             
             with st.chat_message("assistant"):
-                response = run_agent(full_message, PORTFOLIO_PROMPT, max_iterations=5)
+                response = run_agent(full_message, PORTFOLIO_PROMPT, max_iterations=6)
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
                 # Save conversation to database
