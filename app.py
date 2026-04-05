@@ -12,9 +12,6 @@ import json
 import time
 from datetime import datetime
 
-# Database integration
-from db import Database
-
 # ══════════════════════════════════════════════
 # CONFIGURATION
 # ══════════════════════════════════════════════
@@ -704,16 +701,7 @@ def _find_cached_data(indicator_category, geography):
     return None
 
 def query_health_data(indicator_category, geography, purpose):
-    """Query DHIS2 demo instance for health data. Checks database cache first."""
-    
-    # Check database cache first (avoids hitting DHIS2 servers repeatedly)
-    if "db" in st.session_state:
-        db = st.session_state.db
-        cache_key = db.make_cache_key("dhis2", indicator_category, geography)
-        cached = db.get_cached_data(cache_key)
-        if cached:
-            cached["cache_note"] = "Served from cache (data refreshes every 24 hours)"
-            return cached
+    """Query DHIS2 demo instance for health data."""
     
     # Map categories to DHIS2 indicator groups/data elements
     indicator_map = {
@@ -923,7 +911,7 @@ def query_health_data(indicator_category, geography, purpose):
                         if analytics_results:
                             debug_log.append(f"DataValueSets returned {len(analytics_results)} values")
             
-            result = {
+            return {
                 "source": f"DHIS2 National Health Information System (demo: {base_url.split('/api')[0].split('/')[-1]})",
                 "data_type": "Verified program data from health facilities",
                 "geography_found": [{"name": ou["displayName"], "level": ou.get("level", "N/A")} for ou in org_units[:3]],
@@ -933,13 +921,6 @@ def query_health_data(indicator_category, geography, purpose):
                 "data_quality_note": "This is demo instance data. In production, this connects to actual national DHIS2 instances.",
                 "debug": debug_log
             }
-            
-            # Cache successful result in database for 24 hours
-            if "db" in st.session_state:
-                cache_key = st.session_state.db.make_cache_key("dhis2", indicator_category, geography)
-                st.session_state.db.set_cached_data(cache_key, result, source="dhis2", ttl_hours=24)
-            
-            return result
             
         except requests.exceptions.Timeout:
             debug_log.append(f"{base_url}: Timed out")
@@ -1295,83 +1276,112 @@ def execute_tool(tool_name, tool_input):
 # AGENT SYSTEM PROMPT
 # ══════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are the AI Giving Advisor, built by Access Digital Health. You are an agentic philanthropic intelligence system that helps donors make evidence-grounded decisions about charitable giving across ALL areas of global health and development (GH&D) — health, education, economic development, agriculture, gender, climate, humanitarian response, and more.
+SYSTEM_PROMPT = """You are the AI Giving Advisor, built by Access Digital Health. You help donors give more and give sooner to global health and development (GH&D).
 
-Your core mission: Help donors give more and give sooner by providing verified evidence, transparent reasoning, and actionable guidance.
+Your mission is NOT just to provide information. It is to move donors from curiosity to action — from "I'm thinking about giving" to "I just gave." Everything you do serves two goals:
 
-## How you work
+**DISCOVERY** — Help the donor find what they care about. Reduce confusion. Narrow options.
+**CONVERSION** — Turn their interest into an actual donation. Remove friction. Make the next step obvious.
 
-You have access to five tools:
-1. **query_health_data** — Pull verified indicators from DHIS2 national health information systems (used in 129 countries). Use ONLY for health-related giving interests.
-2. **search_evidence** — Search curated impact evaluations from GiveWell, DCP3, Cochrane, J-PAL covering health, education, cash transfers, agriculture, livelihoods, gender, climate, and humanitarian interventions.
-3. **assess_cost_effectiveness** — Look up cost per DALY averted (health), cost per beneficiary, benefit-cost ratios, and value for money across all sectors.
-4. **find_organizations** — Find rated organizations across all GH&D sectors: health, education, economic development, agriculture, gender, humanitarian, climate, diagnostics, digital health.
-5. **web_research** — Conduct live web research for current information — especially important for non-health topics, current crises, and specific geographies.
+## Your tools
 
-## Adapting to the donor's sector interest
+1. **query_health_data** — DHIS2 health indicators from 129 countries. Use for health topics ONLY. This is your differentiator — real facility data, not just charity ratings.
+2. **search_evidence** — Curated evidence from GiveWell, DCP3, Cochrane, J-PAL across health, education, cash transfers, agriculture, livelihoods, gender, climate, humanitarian.
+3. **assess_cost_effectiveness** — Cost per DALY, cost per beneficiary, benefit-cost ratios across all sectors.
+4. **find_organizations** — Rated organizations across all GH&D sectors with websites.
+5. **web_research** — Live current information. Critical for non-health topics, current crises, and geographies.
 
-- **Health interests** (malaria, maternal health, immunization, HIV, TB, nutrition): Use all 5 tools. ALWAYS query DHIS2 to ground recommendations in real health facility data. This is your key differentiator.
-- **Education interests** (girls' education, early childhood, literacy, school feeding): Use search_evidence + assess_cost_effectiveness + find_organizations + web_research. Frame impact in terms of additional school years, earnings gains, and lives changed.
-- **Economic development interests** (cash transfers, livelihoods, agriculture, microfinance): Use search_evidence + find_organizations + web_research. Frame impact in income gains, poverty reduction, ROI per dollar.
-- **Humanitarian interests** (refugees, disaster response, food security): Use search_evidence + find_organizations + web_research. Frame impact in lives protected, cost-effectiveness vs in-kind aid.
-- **Climate/gender/other interests**: Use search_evidence + find_organizations + web_research heavily. These areas have growing but more varied evidence bases.
-- **"I don't know where to give"**: Start with the most cost-effective interventions across all sectors, present options spanning health, education, and economic development, and help the donor discover what resonates.
+Use at least 3 tools per response. The multi-source analysis is what makes you valuable.
 
-## Detecting and adapting to donor type
+## DISCOVERY: Helping donors find their cause
 
-Read the donor's message for cues about their profile and adapt your response:
+**When a donor is vague or exploring:**
+- Ask ONE smart clarifying question — never more. Frame it as a binary or triple choice, not open-ended.
+  - "I care about children" → "Are you drawn more to keeping children alive today (malaria, immunization) or giving them a better future (education, nutrition)? Or should I show you the single highest-impact option across both?"
+  - "I want to help Africa" → "Would you like to focus on a specific country you feel connected to, or should I find where your money stretches furthest across the continent?"
+  - "I want to make a difference" → "Would you like to save the most lives per dollar (health interventions), create long-term change (education, livelihoods), or support people in crisis right now (humanitarian)?"
+- After their answer, commit to 2 options maximum. Do NOT then present 6 alternatives.
+- If they say "I don't know" or "you decide," give them ONE recommendation with full conviction: "Based on the evidence, here's what I'd do with your money."
 
-**Everyday donor ($100-$5,000)**: Keep it simple and actionable. 2-3 specific recommendations. Concrete impact framing ("your $500 could provide bed nets protecting ~167 people for 3 years"). Focus on one or two highest-impact options. Make the path to giving clear.
+**When a returning donor has a stored profile:**
+- Reference their history naturally: "Welcome back. Last time you were exploring girls' education in East Africa with a $5,000 budget. Want to pick up where we left off, or explore something new?"
+- If they have a stored giving profile (causes, budget, geography), use it as context but don't assume they want the same thing: "I remember you care about [causes] in [geography]. Shall I find the latest opportunities there, or are you thinking about something different today?"
+- Build on previous conversations, don't repeat them.
 
-**Engaged donor ($5,000-$50,000)**: More depth. Compare 3-4 options with tradeoffs. Show the evidence reasoning. Discuss geographic focus. Introduce portfolio thinking ("consider splitting between a proven intervention and an emerging one").
+**When a donor is exploring or uncertain:**
+- Don't dump 10 options. Narrow to 2-3 based on what they've said.
+- Use concrete human stories, not abstract statistics. "In Kilifi County, 1 in 4 girls drops out of school due to pregnancy" lands harder than "dropout rates are elevated."
+- Connect causes to things they already care about. A parent might connect with child mortality. A teacher might connect with education. Listen for these cues.
 
-**High-net-worth / strategic donor ($50,000+)**: Landscape analysis. Funding gaps. What's underfunded in their area of interest. Strategic vs. direct giving. Program vs. systems change. Introduce the concept of leverage and additionality.
+**Sector routing for tools:**
+- Health interests → all 5 tools. ALWAYS query DHIS2.
+- Education → search_evidence + assess_cost_effectiveness + find_organizations + web_research. Frame as school years and earnings.
+- Economic development → search_evidence + find_organizations + web_research. Frame as income gains and poverty reduction.
+- Humanitarian → search_evidence + find_organizations + web_research. Frame as lives protected.
+- Climate/gender/other → search_evidence + find_organizations + web_research.
 
-**Diaspora donor (mentions home country)**: Geography-first. What's happening in that specific country. Local organizations doing effective work. Cultural context. How to give from abroad. This is deeply personal — honor that.
+## CONVERSION: Turning interest into a donation
 
-**Foundation / institutional**: Sector mapping. Evidence landscape. Where are the gaps. What other funders are doing. Strategy rather than specific org recommendations.
+**EVERY response that includes a recommendation MUST end with a clear next step.** This is non-negotiable. The donor should never finish reading and think "that was interesting" without knowing exactly what to do.
 
-**New to giving**: Start with the basics. Why GH&D giving matters. What "effective giving" means. Show the range of what's possible. Don't overwhelm — 2 concrete options maximum. Be encouraging.
+The conversion close has three parts, PLUS a giving action plan:
 
-## Your reasoning approach
+1. **Concrete impact at their budget** — "Your $1,000 could provide bed nets protecting 333 people from malaria for 3 years through Against Malaria Foundation." Not vague. Not a range. One number, one outcome, one organization.
 
-When a donor describes their interests, use at least 3 different tools for a comprehensive, multi-source analysis:
+2. **Exactly how to give** — "Visit againstmalaria.com/donate. The process takes about 2 minutes. They accept credit cards and bank transfers." If the donor is in Nigeria or another LMIC, address cross-border payment: "From Nigeria, you can donate via their website using a Visa or Mastercard. For larger amounts, consider GlobalGiving.org as an intermediary."
 
-1. **Understand** — Clarify goals, values, budget, geography. If they're vague, work with what they give you. Don't over-interrogate.
+3. **Urgency without pressure** — Connect to real-time need. Use the urgent finding from your data query. "DHIS2 data shows bed net coverage collapsed to 10% — your donation would address an active crisis." Not manufactured urgency — real data.
 
-2. **Scope** — Use search_evidence to identify interventions with the strongest evidence base for their interest area.
+4. **Giving action plan** — At the END of every recommendation, generate a structured summary the donor can screenshot and act on. Format it exactly like this:
 
-3. **Ground** — For health topics: ALWAYS use query_health_data to show real program indicators from DHIS2. Frame it as: "Let me show you what the data tells us on the ground." For non-health topics: use web_research to find current context and data for the relevant geography.
+---
+**YOUR GIVING PLAN**
 
-4. **Assess** — Use assess_cost_effectiveness to analyze value for money. Help the donor understand how far their budget goes with different approaches. For non-health, express this as cost per beneficiary, benefit-cost ratios, or income gains.
+**Total:** $[amount]
+**Allocation:**
+- $[amount1] → [Organization 1] ([what it funds])
+- $[amount2] → [Organization 2] ([what it funds])
 
-5. **Match** — Use find_organizations to identify specific programs the donor can support. Include: what they do, where they work, their track record, and how the donor can give to them.
+**How to give:**
+1. Visit [organization1.org/donate] → Select $[amount1] → Complete in ~2 minutes
+2. Visit [organization2.org/donate] → Select $[amount2] → Complete in ~2 minutes
 
-6. **Advise** — Synthesize into a clear recommendation. Be transparent about evidence strength, uncertainty, and tradeoffs.
+**Expected impact:** [concrete outcome summary]
+---
 
-## Giving pathway guidance
+This plan is the single most important conversion tool. A donor who reads a great recommendation but has no clear next step will procrastinate. A donor with a step-by-step plan acts.
 
-After recommending organizations, help the donor understand HOW to give:
-- For major GH&D charities (GiveWell top charities, etc.): most accept online donations via their websites
-- For donors giving from Nigeria or other LMIC countries: note any cross-border payment considerations
-- For larger gifts: mention donor-advised funds, giving circles, or intermediary platforms like GlobalGiving
-- For diaspora donors: highlight organizations with local presence and international fundraising channels
-- Always include the organization's website URL if available
+**If the donor seems ready:** End with "Would you like me to summarize your giving plan so you have a clear action list?"
 
-## Important guidelines
+**If the donor is still exploring:** End with "Would you like to explore [one specific alternative] or are you ready to move forward with [the recommendation]?" — always binary, never open-ended.
 
-- Show your reasoning transparently. The donor should understand WHY you recommend what you recommend.
-- Use multiple tools for comprehensive analysis. Don't rely on a single source.
-- Be honest about limitations and uncertainty. Evidence varies by context.
-- Present impact in concrete, accessible terms adapted to the donor's budget.
-- Never be pushy. You're an advisor, not a salesperson.
-- Be warm and encouraging. Philanthropic giving is deeply personal.
-- If the donor's interest doesn't map to GH&D, gently explore whether there's an angle, but don't force it.
-- For returning donors or those who mention past giving, build on what they've already done.
+## Adapting to donor type
+
+**Everyday donor ($100-$5,000)**: 2 options maximum. Concrete impact. Simple giving path. One paragraph, not an essay. End with: "Here's what I'd do with your $X..."
+
+**Engaged donor ($5,000-$50,000)**: 3-4 options with tradeoffs. Portfolio thinking. More evidence depth. End with: "Based on your priorities, here's how I'd split your $X..."
+
+**Strategic donor ($50,000+)**: Landscape analysis. Funding gaps. Additionality. End with: "Here's a portfolio allocation strategy for your $X..."
+
+**Diaspora donor**: Geography-first. Honor the personal connection. Local organizations. Cross-border payment guidance. End with: "Here are the organizations making the biggest difference in [country] that you can support from abroad..."
+
+**New donor**: ONE option. Encouraging. Low pressure. End with: "The simplest way to start is..." — make it feel easy, not overwhelming.
+
+## Your reasoning stages
+
+1. **Understand** — What does the donor care about? Budget? Geography? Don't over-ask. If vague, ask ONE clarifying question per the discovery guidance above.
+2. **Scope** — search_evidence for strongest interventions in their area.
+3. **Ground** — query_health_data for health topics (show real coverage gaps) OR web_research for current context in their geography.
+4. **Find the urgency** — From the data you just retrieved, identify the most URGENT or STRIKING finding and lead with it. "Coverage dropped 62 percentage points in 6 months" or "31.8 million people are food insecure right now" or "only 54% of mothers deliver in a health facility." This is what makes the donor feel the need is REAL and NOW, not abstract.
+5. **Assess** — assess_cost_effectiveness to frame their budget's potential impact.
+6. **Match** — find_organizations for specific recommendations with track records and URLs.
+7. **Close** — Synthesize into a recommendation with the three-part conversion close PLUS the giving action plan.
 
 ## Tone
 
-Professional but warm. Evidence-driven but accessible. Adapted to the donor's sophistication level. Think: a knowledgeable friend who cares about global impact and wants to help you make the most of your generosity — whether you're giving $200 or $200,000, whether you care about malaria or girls' education or food security.
+Warm, confident, action-oriented. You're a trusted friend who happens to know the evidence inside-out. You care about the donor's values AND about making sure their generosity actually reaches people in need. You're not neutral — you genuinely want them to give, and to give well. But you respect their autonomy and never pressure.
+
+When presenting evidence, be honest about uncertainty. But when recommending action, be clear and direct. "Based on everything I've found, here's what I'd do with your money" is more helpful than "here are some options you might consider."
 """
 
 EVALUATION_PROMPT = """You are the Proposal Evaluator, built by Access Digital Health. You evaluate grant proposals and funding requests across all areas of global health and development (GH&D) — including health, education, economic development, agriculture, gender, climate, humanitarian, and other development sectors.
@@ -1448,7 +1458,18 @@ Structure your evaluation as:
 
 ## MANDATORY RECOMMENDATION LOGIC
 
-Your recommendation MUST follow this decision matrix:
+BEFORE WRITING YOUR RECOMMENDATION, you MUST complete this self-check:
+
+Step 1: Rate the substantive merit of the PROPOSAL DESIGN (not the organization):
+- Evidence alignment: Strong / Moderate / Weak?
+- Value for money: Good / Fair / Poor / Cannot assess?
+- Technical feasibility: High / Medium / Low?
+
+Step 2: If 2+ of those are Strong/Good/High → Substantive Merit = STRONG
+         If 2+ are Moderate/Fair/Medium → Substantive Merit = MODERATE
+         If 2+ are Weak/Poor/Low → Substantive Merit = WEAK
+
+Step 3: Look up the recommendation in this matrix:
 
 | Substantive Merit | Org Verified | Recommendation |
 |---|---|---|
@@ -1459,9 +1480,11 @@ Your recommendation MUST follow this decision matrix:
 | Moderate | Inconclusive | FUND WITH CONDITIONS (enhanced monitoring) |
 | Weak | Any | DO NOT FUND |
 
-CRITICAL RULE: "DO NOT FUND" requires WEAK SUBSTANTIVE MERIT. Inconclusive org verification alone is NEVER sufficient for a DO NOT FUND recommendation. The correct response to org verification risk is milestone-based disbursement with verification as a pre-condition for the first tranche — NOT refusing to fund entirely.
+Step 4: Write the recommendation that the matrix dictates. DO NOT DEVIATE.
 
-RATIONALE: Funders hire evaluators to assess proposal quality. A blanket "do not fund because we can't Google the org" provides zero analytical value — any intern could do that. Your value is in the substantive analysis that helps funders decide WHETHER the proposal deserves the due diligence effort. If the substance is strong, the funder should pursue verification. If the substance is weak, verification is moot.
+ABSOLUTE RULE: "DO NOT FUND" requires WEAK SUBSTANTIVE MERIT. If the proposal design is rated Strong or Moderate on substance, you MUST recommend FUND WITH CONDITIONS regardless of organizational concerns. Org verification issues are addressed through CONDITIONS (milestone-based disbursement, verification-first tranche), NOT through rejection.
+
+VIOLATION CHECK: If you find yourself writing "DO NOT FUND" for a proposal where you rated evidence as "Strong" or "Moderate to Strong" — STOP. You are violating the decision matrix. Go back and correct to FUND WITH CONDITIONS.
 
 When recommending FUND WITH CONDITIONS, always include:
 - Pre-disbursement conditions (org registration, audited financials, reference checks, site visit)
@@ -1556,61 +1579,6 @@ def init_session_state():
         st.session_state.portfolio_grants = []
     if "portfolio_reports" not in st.session_state:
         st.session_state.portfolio_reports = {}
-    if "explore_messages" not in st.session_state:
-        st.session_state.explore_messages = []
-    
-    # Database initialization
-    if "db" not in st.session_state:
-        supabase_url = st.secrets.get("SUPABASE_URL", "") if hasattr(st, "secrets") else ""
-        supabase_key = st.secrets.get("SUPABASE_KEY", "") if hasattr(st, "secrets") else ""
-        st.session_state.db = Database(supabase_url, supabase_key)
-    
-    # User session
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = None
-    if "user_email" not in st.session_state:
-        st.session_state.user_email = ""
-    if "db_loaded" not in st.session_state:
-        st.session_state.db_loaded = False
-    
-    # Load default API key from secrets if available
-    if not st.session_state.api_key and hasattr(st, "secrets"):
-        default_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-        if default_key:
-            st.session_state.api_key = default_key
-
-
-def load_user_data():
-    """Load persisted data for the current user from database."""
-    db = st.session_state.db
-    user_id = st.session_state.user_id
-    
-    if not user_id or st.session_state.db_loaded:
-        return
-    
-    # Load portfolio grants
-    saved_grants = db.load_portfolio(user_id)
-    if saved_grants:
-        st.session_state.portfolio_grants = saved_grants
-    
-    # Load recent evaluations into session
-    saved_evals = db.get_evaluations(user_id, limit=5)
-    if saved_evals and not st.session_state.eval_result:
-        st.session_state.eval_result = saved_evals[0].get("evaluation_text")
-    
-    # Load report analyses
-    saved_reports = db.get_report_analyses(user_id)
-    for r in saved_reports:
-        grant_name = r.get("grant_name", "")
-        if grant_name and grant_name not in st.session_state.portfolio_reports:
-            st.session_state.portfolio_reports[grant_name] = r.get("analysis_text", "")
-    
-    # Load giving profile
-    profile = db.get_giving_profile(user_id)
-    if profile:
-        st.session_state.setdefault("giving_profile", profile)
-    
-    st.session_state.db_loaded = True
 
 
 def render_sidebar():
@@ -1619,29 +1587,9 @@ def render_sidebar():
         st.markdown(f"**{APP_TITLE}**")
         st.divider()
         
-        # User session (simple email-based)
-        user_email = st.text_input("Your email (for saving data)", value=st.session_state.user_email, placeholder="you@example.com")
-        if user_email and user_email != st.session_state.user_email:
-            st.session_state.user_email = user_email
-            user = st.session_state.db.get_or_create_user(user_email)
-            st.session_state.user_id = user.get("id")
-            st.session_state.db_loaded = False  # Trigger reload
-            load_user_data()
-            st.rerun()
-        
         api_key = st.text_input("Anthropic API Key", type="password", value=st.session_state.api_key)
         if api_key:
             st.session_state.api_key = api_key
-        
-        st.divider()
-        
-        # Database status
-        db_status = st.session_state.db.get_status()
-        if db_status["connected"]:
-            st.markdown(f"🟢 **Database:** Connected (Supabase)")
-        else:
-            st.markdown(f"🟡 **Database:** Session only (no persistence)")
-            st.caption("Add Supabase credentials for data persistence")
         
         st.divider()
         
@@ -1716,20 +1664,6 @@ def run_agent(user_message, system_prompt=None):
     
     if system_prompt is None:
         system_prompt = SYSTEM_PROMPT
-    
-    # Inject context from previous sessions if available
-    if st.session_state.user_id and st.session_state.db.connected:
-        db = st.session_state.db
-        context = db.get_context_summary(st.session_state.user_id, st.session_state.mode)
-        
-        # Add giving profile for donor mode
-        if st.session_state.mode == "donor":
-            profile = db.get_giving_profile(st.session_state.user_id)
-            if profile:
-                context += f"RETURNING DONOR PROFILE: {json.dumps(profile)}\n\n"
-        
-        if context:
-            system_prompt = system_prompt + "\n\n" + context
     
     client = anthropic.Anthropic(api_key=st.session_state.api_key)
     
@@ -1877,10 +1811,6 @@ def main():
     init_session_state()
     render_sidebar()
     
-    # Load persisted data for returning users
-    if st.session_state.user_id and not st.session_state.db_loaded:
-        load_user_data()
-    
     mode = st.session_state.mode
     
     if mode == "donor":
@@ -1901,7 +1831,7 @@ def render_donor_mode():
     </div>
     """, unsafe_allow_html=True)
     
-    tab1, tab2, tab3 = st.tabs(["🧭 Guided giving", "📊 Explore & compare", "💬 Open conversation"])
+    tab1, tab2, tab3 = st.tabs(["🧭 Guided giving", "💡 Impact calculator", "💬 Open conversation"])
     
     # ── TAB 1: GUIDED GIVING ──
     with tab1:
@@ -2020,109 +1950,134 @@ Please:
                 st.session_state.messages.append({"role": "user", "content": follow_up})
                 st.rerun()
     
-    # ── TAB 2: EXPLORE & COMPARE ──
+    # ── TAB 2: IMPACT CALCULATOR ──
     with tab2:
-        st.markdown("#### Explore and compare causes")
-        st.markdown("Tell us what you want to compare — causes, interventions, sectors, geographies — and the AI will analyze the tradeoffs using evidence, cost-effectiveness data, and current context.")
+        st.markdown("#### What could your donation accomplish?")
+        st.markdown("Enter an amount and instantly see the concrete impact across different causes — lives saved, children educated, families supported.")
         
-        # Initialize explore state
-        if "explore_messages" not in st.session_state:
-            st.session_state.explore_messages = []
+        # Budget input
+        col_amount, col_geo = st.columns([2, 1])
+        with col_amount:
+            raw_amount = st.number_input("Your giving budget ($)", min_value=10, max_value=10000000, value=1000, step=100, key="impact_budget")
+        with col_geo:
+            impact_geo = st.selectbox("Region focus (optional)", 
+                ["Wherever impact is greatest", "West Africa", "East Africa", "South Asia", "Nigeria", "Kenya", "Sierra Leone"],
+                key="impact_geo")
         
-        if not st.session_state.explore_messages:
-            # ── PRIMARY INPUT: What do you want to compare? ──
-            compare_input = st.text_area(
-                "What do you want to compare?",
-                placeholder="Examples:\n• Malaria bed nets vs girls' education vs cash transfers\n• Health interventions vs education interventions for $10,000\n• Best ways to help Nigeria — across all sectors\n• Emergency food aid vs agricultural development for food security\n• Compare the top 5 most cost-effective interventions overall",
-                height=100,
-                key="compare_input"
-            )
-            
-            col_budget, col_geo = st.columns(2)
-            with col_budget:
-                compare_budget = st.text_input("Your budget (optional)", placeholder="e.g., $5,000", key="compare_budget")
-            with col_geo:
-                compare_geo = st.text_input("Geographic focus (optional)", placeholder="e.g., East Africa, Nigeria", key="compare_geo")
-            
-            if st.button("📊 Compare", type="primary", use_container_width=True, disabled=not compare_input):
-                full_prompt = f"""{compare_input}
-
-{"Budget: " + compare_budget if compare_budget else ""}
-{"Geographic focus: " + compare_geo if compare_geo else ""}
-
-Provide a structured comparison covering:
-1. Cost-effectiveness — how far does each dollar go with each option?
-2. Evidence strength — how confident are we each approach works?
-3. Funding landscape — which options are underfunded vs well-funded?
-4. Time to impact — immediate results vs long-term transformation
-5. Who should choose what — match different donor motivations to different options
-6. Top organizations for each option with websites
-7. Bottom line — an honest assessment of tradeoffs
-{"8. Concrete impact estimates for my " + compare_budget + " budget" if compare_budget else ""}
-
-Be direct. Some options ARE more cost-effective than others — say so. But also acknowledge that cost-effectiveness isn't the only valid reason to give."""
-                st.session_state.explore_messages = [{"role": "user", "content": full_prompt}]
+        amount = float(raw_amount)
+        
+        st.markdown("---")
+        
+        # Calculate impacts locally — no API calls needed
+        impacts = [
+            {
+                "icon": "🦟", "title": "Malaria prevention", "subtitle": "Insecticide-treated bed nets",
+                "primary": f"{int(amount / 3):,} bed nets",
+                "detail": f"Protecting ~{int(amount / 3 * 1.8):,} people for 3 years",
+                "lives": f"~{max(1, int(amount / 4500)):,} lives saved" if amount >= 1000 else "Contributing to lives saved",
+                "evidence": "Very strong (Cochrane reviewed)", "cost_metric": "$3 per net · $4,500 per life saved",
+                "org": "Against Malaria Foundation", "org_url": "againstmalaria.com", "org_rating": "GiveWell Top Charity", "color": "#E8593C",
+            },
+            {
+                "icon": "💵", "title": "Direct cash transfers", "subtitle": "Unconditional cash to extreme poor",
+                "primary": f"${int(amount * 0.85):,} directly to families",
+                "detail": f"~{max(1, int(amount * 0.85 / 270)):,} families receiving ~$270 each" if amount >= 500 else f"Direct support to {max(1, int(amount * 0.85 / 270))} family",
+                "lives": "25-30% lasting consumption increase", "evidence": "Very strong (30+ RCTs)", "cost_metric": "85% transfer efficiency · $6-17 return per $1",
+                "org": "GiveDirectly", "org_url": "givedirectly.org", "org_rating": "GiveWell Top Charity", "color": "#1D9E75",
+            },
+            {
+                "icon": "📚", "title": "Girls' education", "subtitle": "Secondary school scholarships",
+                "primary": f"{max(1, int(amount / 250)):,} girls supported for a year",
+                "detail": f"Each additional year: 8-13% higher lifetime earnings",
+                "lives": f"Reduces child marriage by 5-10% per year of school", "evidence": "Strong (World Bank, J-PAL)", "cost_metric": "$250 per girl per year · $6-17 return per $1 invested",
+                "org": "Camfed", "org_url": "camfed.org", "org_rating": "GiveWell Standout Charity", "color": "#534AB7",
+            },
+            {
+                "icon": "💊", "title": "Vitamin A supplementation", "subtitle": "Preventing child blindness and death",
+                "primary": f"{int(amount / 1.25):,} children supplemented",
+                "detail": "24% reduction in all-cause mortality for children 6-59 months",
+                "lives": f"~{max(1, int(amount / 3500)):,} lives saved" if amount >= 1000 else "Contributing to lives saved",
+                "evidence": "Very strong (Cochrane review)", "cost_metric": "$1.25 per child · $15-50 per DALY averted",
+                "org": "Helen Keller International", "org_url": "hki.org", "org_rating": "GiveWell Top Charity", "color": "#BA7517",
+            },
+            {
+                "icon": "💉", "title": "Child immunization incentives", "subtitle": "Cash incentives for completing vaccinations",
+                "primary": f"~{max(1, int(amount / 50)):,} children fully immunized",
+                "detail": "Addresses low vaccination rates through conditional cash",
+                "lives": "Prevents measles, polio, diphtheria, and other deadly diseases",
+                "evidence": "Strong (RCT-evaluated in Nigeria)", "cost_metric": "$50 per fully immunized child",
+                "org": "New Incentives", "org_url": "newincentives.org", "org_rating": "GiveWell Top Charity", "color": "#378ADD",
+            },
+            {
+                "icon": "🌾", "title": "Smallholder farming support", "subtitle": "Seeds, training, and market access",
+                "primary": f"{max(1, int(amount / 80)):,} farmers supported",
+                "detail": "20-50% yield increases with bundled inputs and training",
+                "lives": f"~${int(amount * 4.2):,} in farmer income generated (4.2x ROI)",
+                "evidence": "Moderate-Strong (One Acre Fund model)", "cost_metric": "$80 per farmer per season · 4-5x return on investment",
+                "org": "One Acre Fund", "org_url": "oneacrefund.org", "org_rating": "Highly rated", "color": "#639922",
+            },
+        ]
+        
+        # Display impact cards
+        st.markdown(f"### With **${amount:,.0f}**, you could fund:")
+        
+        for i in range(0, len(impacts), 2):
+            cols = st.columns(2)
+            for j, col in enumerate(cols):
+                if i + j < len(impacts):
+                    imp = impacts[i + j]
+                    with col:
+                        st.markdown(f"""
+                        <div style="border: 1px solid rgba(128,128,128,0.2); border-left: 4px solid {imp['color']}; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
+                            <div style="font-size: 1.3rem; margin-bottom: 4px;">{imp['icon']} <strong>{imp['title']}</strong></div>
+                            <div style="font-size: 0.85rem; color: #888; margin-bottom: 10px;">{imp['subtitle']}</div>
+                            <div style="font-size: 1.4rem; font-weight: 600; margin-bottom: 4px;">{imp['primary']}</div>
+                            <div style="font-size: 0.9rem; margin-bottom: 4px;">{imp['detail']}</div>
+                            <div style="font-size: 0.85rem; margin-bottom: 8px;">{imp['lives']}</div>
+                            <div style="font-size: 0.8rem; color: #888; margin-bottom: 4px;">Evidence: {imp['evidence']}</div>
+                            <div style="font-size: 0.8rem; color: #888; margin-bottom: 8px;">{imp['cost_metric']}</div>
+                            <div style="font-size: 0.85rem;"><strong>{imp['org']}</strong> ({imp['org_rating']}) · {imp['org_url']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+        
+        # Conversion: action buttons
+        st.markdown("---")
+        st.markdown("#### Ready to go deeper?")
+        
+        deep_cols = st.columns(3)
+        with deep_cols[0]:
+            if st.button("🎯 Get my personalized recommendation", key="impact_to_rec", use_container_width=True):
+                prompt = f"""I have ${amount:,.0f} to give{' with a focus on ' + impact_geo if impact_geo != 'Wherever impact is greatest' else ''}. I've seen the impact estimates. Now give me your personalized recommendation — which intervention should I prioritize, why, and exactly how to donate. Include the organization website and step-by-step donation instructions."""
+                st.session_state.messages = [{"role": "user", "content": prompt}]
                 st.rerun()
-            
-            # ── INSPIRATION: Common comparisons ──
-            st.markdown("---")
-            st.markdown("##### Or start with a common question")
-            
-            # Big tradeoffs
-            st.markdown("**The big tradeoffs in giving:**")
-            tradeoff_cols = st.columns(2)
-            tradeoffs = [
-                ("Save a life today vs transform a life over a decade",
-                 "Compare interventions that save lives immediately (malaria bed nets, oral rehydration, vitamin A) versus investments that transform lives long-term (girls' education, early childhood development, livelihoods programs). Analyze cost-effectiveness, evidence strength, sustainability, and time to impact. Help me think about how to weigh these."),
-                ("Give cash directly vs fund specific programs",
-                 "Compare unconditional cash transfers (GiveDirectly model) versus targeted programs like immunization, school feeding, or agricultural extension. What does the evidence say about when cash is better vs when programs are better? Include cost-effectiveness data and specific organizations."),
-                ("Back what's proven vs fund what's neglected",
-                 "Compare the most proven, evidence-backed interventions (bed nets, deworming, cash transfers) against underfunded areas with potentially high impact but less evidence (climate adaptation, mental health, early childhood). How should I think about risk vs expected value in giving?"),
-                ("Most cost-effective interventions across ALL sectors",
-                 "Rank the top 8-10 most cost-effective interventions across all of global health and development — health, education, economic, humanitarian, everything. For each, show cost per unit of impact, evidence strength, and the best organization delivering it. I want the full landscape."),
-            ]
-            for i, (title, prompt) in enumerate(tradeoffs):
-                with tradeoff_cols[i % 2]:
-                    if st.button(title, key=f"tf_{i}", use_container_width=True):
-                        st.session_state.explore_messages = [{"role": "user", "content": prompt}]
-                        st.rerun()
-            
-            # Sector and budget questions
-            st.markdown("**Sector deep dives and budget questions:**")
-            more_cols = st.columns(3)
-            more_qs = [
-                ("Global health landscape", "Give me the complete landscape of global health giving — top interventions ranked by cost-effectiveness, evidence, and funding gaps. Which are overfunded? Which are neglected? Where does a new dollar go furthest?"),
-                ("Education & human capital", "Compare all major education interventions: girls' scholarships, school feeding, deworming, early childhood development, teacher training. Rank by evidence strength and cost-effectiveness. Which organizations lead each?"),
-                ("Poverty & economic development", "Compare cash transfers, graduation programs, microfinance, agricultural support, and vocational training for reducing extreme poverty. What does the evidence say works best? At what cost?"),
-                ("What can $500 do?", "I have $500. Show me the single most impactful option AND an alternative that takes a different approach. Make it concrete — exactly how many people helped, lives saved, or outcomes changed."),
-                ("What can $10,000 do?", "I have $10,000. Compare 4 different allocation strategies: all-in on one cause, split across 2 sectors, diversified portfolio, and strategic gap-filling. Show expected impact for each."),
-                ("Nigeria — where are the gaps?", "Analyze Nigeria specifically across all sectors. Where are the biggest needs? Which interventions are most cost-effective in the Nigerian context? What does DHIS2 health data show? Which organizations are doing the best work there?"),
-            ]
-            for i, (title, prompt) in enumerate(more_qs):
-                with more_cols[i % 3]:
-                    if st.button(title, key=f"mq_{i}", use_container_width=True):
-                        st.session_state.explore_messages = [{"role": "user", "content": prompt}]
-                        st.rerun()
+        with deep_cols[1]:
+            if st.button("📊 Compare top 3 options for me", key="impact_to_compare", use_container_width=True):
+                prompt = f"""I have ${amount:,.0f}. Compare malaria bed nets, cash transfers, and girls' education in depth for my specific budget. For each: what exactly my money accomplishes, the evidence, and the best organization. Then tell me which one YOU would choose and why. End with donation links."""
+                st.session_state.messages = [{"role": "user", "content": prompt}]
+                st.rerun()
+        with deep_cols[2]:
+            if st.button("🌍 Show me the need on the ground", key="impact_to_dhis2", use_container_width=True):
+                geo = impact_geo if impact_geo != "Wherever impact is greatest" else "Sierra Leone"
+                prompt = f"""Query DHIS2 for current health data in {geo}. Show me where the coverage gaps are right now — the real numbers from health facilities. I have ${amount:,.0f} and want to put it where the data shows the most urgent need. End with a specific recommendation and how to donate."""
+                st.session_state.messages = [{"role": "user", "content": prompt}]
+                st.rerun()
         
-        else:
-            # ── SHOW EXPLORATION CONVERSATION ──
-            for msg in st.session_state.explore_messages:
+        # Show agent results if triggered
+        if st.session_state.messages:
+            st.markdown("---")
+            for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
             
-            if st.session_state.explore_messages[-1]["role"] == "user":
+            if st.session_state.messages[-1]["role"] == "user":
                 with st.chat_message("assistant"):
-                    response = run_agent(st.session_state.explore_messages[-1]["content"], SYSTEM_PROMPT)
+                    response = run_agent(st.session_state.messages[-1]["content"], SYSTEM_PROMPT)
                     st.markdown(response)
-                    st.session_state.explore_messages.append({"role": "assistant", "content": response})
+                    st.session_state.messages.append({"role": "assistant", "content": response})
                 st.rerun()
             
-            if follow_up := st.chat_input("Ask a follow-up or refine the comparison...", key="explore_chat"):
-                st.session_state.explore_messages.append({"role": "user", "content": follow_up})
-                st.rerun()
-            
-            if st.button("← New comparison", key="reset_explore"):
-                st.session_state.explore_messages = []
+            if follow_up := st.chat_input("Ask a follow-up question...", key="impact_chat"):
+                st.session_state.messages.append({"role": "user", "content": follow_up})
                 st.rerun()
     
     # ── TAB 3: OPEN CONVERSATION ──
@@ -2131,17 +2086,17 @@ Be direct. Some options ARE more cost-effective than others — say so. But also
         st.markdown("Have a conversation with the AI advisor. It has access to health data, impact evidence, cost-effectiveness analysis, organization databases, and live web research.")
         
         if not st.session_state.messages:
-            st.markdown("*Start with a question, or try one of these:*")
+            st.markdown("*Tell me what you care about and your budget — I'll find the highest-impact way to give:*")
             col1, col2 = st.columns(2)
             starters = [
-                ("🦟 Reduce malaria deaths", "I want to help reduce malaria deaths in sub-Saharan Africa. I have $5,000 to give. Where would it have the most impact?"),
-                ("📚 Support girls' education", "I want to help girls stay in school in East Africa. What does the evidence say works, and which organizations should I consider?"),
-                ("🌾 Fight hunger", "I'm concerned about the food crisis in the Sahel. How can I help smallholder farmers or families facing hunger with $3,000?"),
-                ("💵 Cash to the poor", "I've heard that giving cash directly to extremely poor people is one of the most effective interventions. Is that true? How does it compare?"),
-                ("🤰 Save mothers' lives", "Maternal mortality is something I care deeply about. What are the most cost-effective ways to save mothers' lives?"),
-                ("🌍 New donor — most impact", "I've never donated to global development before. I have $500 and want to do the most good possible. What are my options?"),
-                ("🇳🇬 Give back to Nigeria", "I'm Nigerian and want to support effective programs in my home country. What are the biggest needs and best organizations?"),
-                ("💰 $100K strategy", "I'm looking to allocate $100,000 across global development causes. Help me think about a giving strategy."),
+                ("🦟 I have $5K for malaria", "I want to help reduce malaria deaths in sub-Saharan Africa. I have $5,000 to give right now. Show me where it would have the most impact and exactly how to donate."),
+                ("📚 Help girls stay in school", "I want to help girls stay in school in East Africa. What does the evidence say works best, which organizations should I give to, and how do I donate to them?"),
+                ("🌾 Fight the food crisis", "I'm concerned about the food crisis in the Sahel — 31 million people facing hunger. I have $3,000. What's the most effective way to help right now?"),
+                ("💵 Give cash directly", "I've heard giving cash directly to extremely poor people is one of the most effective interventions. Is that true? I have $1,000 — show me how it compares and how to give."),
+                ("🚨 What's urgent right now?", "What are the most urgent needs in global development RIGHT NOW? Where has the situation worsened recently? I have $2,000 and want to put it where it's needed most urgently today. Show me the data and tell me exactly how to help."),
+                ("🌍 New here — $500 to do the most good", "I've never donated to global development before. I have $500 and want to do the most good possible. Give me ONE clear recommendation and tell me exactly how to donate."),
+                ("🇳🇬 I want to give back to Nigeria", "I'm Nigerian and want to support effective programs in my home country. What are the biggest needs, best organizations, and how do I donate from abroad?"),
+                ("💰 $100K giving strategy", "I'm looking to deploy $100,000 across global development. Help me build a giving portfolio — which sectors, what allocation, which organizations, and how to execute."),
             ]
             for i, (title, prompt) in enumerate(starters):
                 col = col1 if i % 2 == 0 else col2
@@ -2236,13 +2191,6 @@ Use your tools to verify health data, check evidence, benchmark costs, and ident
             if response and "rate_limit" not in response.lower() and "Error" not in response[:20]:
                 status.update(label="Agentic evaluation complete", state="complete")
                 st.session_state.eval_result = response
-                # Persist evaluation to database
-                if st.session_state.user_id:
-                    st.session_state.db.save_evaluation(
-                        st.session_state.user_id, "Uploaded proposal", truncated[:500],
-                        "auto-detected", "auto-detected", "See evaluation text",
-                        response, st.session_state.tool_calls_log
-                    )
                 agentic_success = True
                 st.rerun()
             else:
@@ -2400,12 +2348,7 @@ def render_portfolio_mode():
         
         if st.button("💾 Save portfolio", type="primary"):
             st.session_state.portfolio_grants = new_grants
-            # Persist to database
-            if st.session_state.user_id:
-                st.session_state.db.save_portfolio(st.session_state.user_id, new_grants)
-                st.success(f"Portfolio saved: {len(new_grants)} grants (persisted to database)")
-            else:
-                st.success(f"Portfolio saved: {len(new_grants)} grants (session only — enter email to persist)")
+            st.success(f"Portfolio saved: {len(new_grants)} grants")
         
         if st.session_state.portfolio_grants:
             st.markdown("---")
@@ -2514,13 +2457,6 @@ Provide a structured analysis:
                 status_display.update(label="Analysis complete", state="complete")
                 
                 st.session_state.portfolio_reports[selected_grant] = result
-                # Persist to database
-                if st.session_state.user_id:
-                    grant_id = grant_data.get("id", "")
-                    st.session_state.db.save_report_analysis(
-                        st.session_state.user_id, grant_id, selected_grant,
-                        truncated_report[:3000], result
-                    )
                 st.markdown("### Report analysis")
                 st.markdown(result)
             except Exception as e:
@@ -2669,12 +2605,6 @@ Format the report as:
                 result = "".join([b.text for b in resp.content if hasattr(b, 'text')])
                 status_display.update(label="Board report complete", state="complete")
                 st.session_state.portfolio_result = result
-                # Persist board report to database
-                if st.session_state.user_id:
-                    st.session_state.db.save_board_report(
-                        st.session_state.user_id, report_period, result,
-                        st.session_state.portfolio_grants
-                    )
                 st.markdown(f"### Board report — {report_period}")
                 st.markdown(result)
             except Exception as e:
