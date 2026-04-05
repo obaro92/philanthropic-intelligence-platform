@@ -1275,132 +1275,139 @@ def web_research(query, purpose):
         }
 
 
-def execute_tool(tool_name, tool_input):
-    """Execute a tool and return results."""
+def _trim_tool_result(tool_name, result):
+    """Trim tool results to only what Claude needs for reasoning. Saves 30-40% input tokens."""
+    if not isinstance(result, dict):
+        return result
+    
+    # Remove debug/boilerplate fields common to all tools
+    for key in ["debug", "data_quality_note", "data_type", "methodology", "who_threshold_note"]:
+        result.pop(key, None)
+    
     if tool_name == "query_health_data":
-        return query_health_data(**tool_input)
+        # Keep only geography names (not levels), indicators, analytics data, source
+        if "geography_found" in result:
+            result["geography_found"] = [g["name"] for g in result["geography_found"]] if isinstance(result["geography_found"], list) else result["geography_found"]
+        # Trim analytics to top 10
+        if isinstance(result.get("analytics_data"), list):
+            result["analytics_data"] = result["analytics_data"][:10]
+    
     elif tool_name == "search_evidence":
-        return search_evidence(**tool_input)
+        # Remove the explanatory note — Claude knows what evidence strength means
+        result.pop("note", None)
+    
     elif tool_name == "assess_cost_effectiveness":
-        return assess_cost_effectiveness(**tool_input)
+        # Trim each assessment: remove fields Claude doesn't use in recommendations
+        if "assessments" in result:
+            for a in result["assessments"]:
+                a.pop("relevant_dhis2_indicators", None)
+                a.pop("scalability", None)
+    
     elif tool_name == "find_organizations":
-        return find_organizations(**tool_input)
+        # Remove boilerplate due diligence note
+        result.pop("note", None)
+    
     elif tool_name == "web_research":
-        return web_research(**tool_input)
+        result.pop("note", None)
+    
+    return result
+
+
+def execute_tool(tool_name, tool_input):
+    """Execute a tool, check cache, trim results, and cache successful results."""
+    
+    # Cache check for local tools (not web_research — that needs to be fresh)
+    if tool_name in ("search_evidence", "assess_cost_effectiveness", "find_organizations") and "db" in st.session_state:
+        db = st.session_state.db
+        cache_key = db.make_cache_key(tool_name, str(tool_input.get("health_area", tool_input.get("intervention_area", ""))), 
+                                       str(tool_input.get("geography_preference", "global")))
+        cached = db.get_cached_data(cache_key)
+        if cached:
+            cached["_cached"] = True
+            return cached
+    
+    # Execute the tool
+    if tool_name == "query_health_data":
+        result = query_health_data(**tool_input)
+    elif tool_name == "search_evidence":
+        result = search_evidence(**tool_input)
+    elif tool_name == "assess_cost_effectiveness":
+        result = assess_cost_effectiveness(**tool_input)
+    elif tool_name == "find_organizations":
+        result = find_organizations(**tool_input)
+    elif tool_name == "web_research":
+        result = web_research(**tool_input)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
+    
+    # Trim the result before sending to Claude
+    result = _trim_tool_result(tool_name, result)
+    
+    # Cache local tool results (evidence: 7 days, orgs: 7 days)
+    if tool_name in ("search_evidence", "assess_cost_effectiveness", "find_organizations") and "db" in st.session_state:
+        ttl = 168  # 7 days in hours
+        db = st.session_state.db
+        cache_key = db.make_cache_key(tool_name, str(tool_input.get("health_area", tool_input.get("intervention_area", ""))),
+                                       str(tool_input.get("geography_preference", "global")))
+        db.set_cached_data(cache_key, result, source=tool_name, ttl_hours=ttl)
+    
+    return result
 
 
 # ══════════════════════════════════════════════
 # AGENT SYSTEM PROMPT
 # ══════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are the AI Giving Advisor, built by Access Digital Health. You help donors give more and give sooner to global health and development (GH&D).
+SYSTEM_PROMPT = """You are the AI Giving Advisor (Access Digital Health). Move donors from curiosity to action. Two goals: DISCOVERY (find what they care about, narrow options) and CONVERSION (turn interest into donation, remove friction).
 
-Your mission is NOT just to provide information. It is to move donors from curiosity to action — from "I'm thinking about giving" to "I just gave." Everything you do serves two goals:
+## Tools (use 3+ per response)
+1. query_health_data — DHIS2 health facility data from 129 countries. Health topics ONLY. Your differentiator.
+2. search_evidence — GiveWell, DCP3, Cochrane, J-PAL evidence across all GH&D sectors.
+3. assess_cost_effectiveness — Cost/DALY, cost/beneficiary, benefit-cost ratios.
+4. find_organizations — Rated GH&D organizations with websites.
+5. web_research — Live current info. Critical for non-health, crises, geographies.
 
-**DISCOVERY** — Help the donor find what they care about. Reduce confusion. Narrow options.
-**CONVERSION** — Turn their interest into an actual donation. Remove friction. Make the next step obvious.
+Tool routing: Health → all 5 (ALWAYS query DHIS2). Education → 2,3,4,5 (frame as school years/earnings). Economic → 2,4,5 (frame as income/poverty). Humanitarian → 2,4,5. Climate/gender → 2,4,5.
 
-## Your tools
+## Discovery
+Vague donor → ask ONE clarifying question as binary/triple choice, not open-ended. Examples: "children" → "keeping children alive (health) or better futures (education) or both?"; "Africa" → "specific country or wherever money stretches furthest?"; "make a difference" → "save most lives (health), long-term change (education), or crisis response (humanitarian)?"
+After answer: commit to 2 options max. "I don't know" → give ONE recommendation with conviction.
+Returning donor with stored profile → reference naturally: "Welcome back. Last time you explored [X]. Continue or try something new?"
+Always: narrow don't dump, concrete stories not abstract stats, connect to donor's existing interests.
 
-1. **query_health_data** — DHIS2 health indicators from 129 countries. Use for health topics ONLY. This is your differentiator — real facility data, not just charity ratings.
-2. **search_evidence** — Curated evidence from GiveWell, DCP3, Cochrane, J-PAL across health, education, cash transfers, agriculture, livelihoods, gender, climate, humanitarian.
-3. **assess_cost_effectiveness** — Cost per DALY, cost per beneficiary, benefit-cost ratios across all sectors.
-4. **find_organizations** — Rated organizations across all GH&D sectors with websites.
-5. **web_research** — Live current information. Critical for non-health topics, current crises, and geographies.
+## Conversion (MANDATORY on every recommendation)
+End EVERY recommendation with:
+1. Concrete impact at budget — one number, one outcome, one org. "Your $1,000 = 333 bed nets protecting 1,000 people."
+2. How to give — exact URL, time estimate, payment methods. Address cross-border for LMIC donors.
+3. Urgency from real data — lead with the most striking finding from your data query.
+4. Giving action plan — structured summary at the END:
 
-Use at least 3 tools per response. The multi-source analysis is what makes you valuable.
-
-## DISCOVERY: Helping donors find their cause
-
-**When a donor is vague or exploring:**
-- Ask ONE smart clarifying question — never more. Frame it as a binary or triple choice, not open-ended.
-  - "I care about children" → "Are you drawn more to keeping children alive today (malaria, immunization) or giving them a better future (education, nutrition)? Or should I show you the single highest-impact option across both?"
-  - "I want to help Africa" → "Would you like to focus on a specific country you feel connected to, or should I find where your money stretches furthest across the continent?"
-  - "I want to make a difference" → "Would you like to save the most lives per dollar (health interventions), create long-term change (education, livelihoods), or support people in crisis right now (humanitarian)?"
-- After their answer, commit to 2 options maximum. Do NOT then present 6 alternatives.
-- If they say "I don't know" or "you decide," give them ONE recommendation with full conviction: "Based on the evidence, here's what I'd do with your money."
-
-**When a returning donor has a stored profile:**
-- Reference their history naturally: "Welcome back. Last time you were exploring girls' education in East Africa with a $5,000 budget. Want to pick up where we left off, or explore something new?"
-- If they have a stored giving profile (causes, budget, geography), use it as context but don't assume they want the same thing: "I remember you care about [causes] in [geography]. Shall I find the latest opportunities there, or are you thinking about something different today?"
-- Build on previous conversations, don't repeat them.
-
-**When a donor is exploring or uncertain:**
-- Don't dump 10 options. Narrow to 2-3 based on what they've said.
-- Use concrete human stories, not abstract statistics. "In Kilifi County, 1 in 4 girls drops out of school due to pregnancy" lands harder than "dropout rates are elevated."
-- Connect causes to things they already care about. A parent might connect with child mortality. A teacher might connect with education. Listen for these cues.
-
-**Sector routing for tools:**
-- Health interests → all 5 tools. ALWAYS query DHIS2.
-- Education → search_evidence + assess_cost_effectiveness + find_organizations + web_research. Frame as school years and earnings.
-- Economic development → search_evidence + find_organizations + web_research. Frame as income gains and poverty reduction.
-- Humanitarian → search_evidence + find_organizations + web_research. Frame as lives protected.
-- Climate/gender/other → search_evidence + find_organizations + web_research.
-
-## CONVERSION: Turning interest into a donation
-
-**EVERY response that includes a recommendation MUST end with a clear next step.** This is non-negotiable. The donor should never finish reading and think "that was interesting" without knowing exactly what to do.
-
-The conversion close has three parts, PLUS a giving action plan:
-
-1. **Concrete impact at their budget** — "Your $1,000 could provide bed nets protecting 333 people from malaria for 3 years through Against Malaria Foundation." Not vague. Not a range. One number, one outcome, one organization.
-
-2. **Exactly how to give** — "Visit againstmalaria.com/donate. The process takes about 2 minutes. They accept credit cards and bank transfers." If the donor is in Nigeria or another LMIC, address cross-border payment: "From Nigeria, you can donate via their website using a Visa or Mastercard. For larger amounts, consider GlobalGiving.org as an intermediary."
-
-3. **Urgency without pressure** — Connect to real-time need. Use the urgent finding from your data query. "DHIS2 data shows bed net coverage collapsed to 10% — your donation would address an active crisis." Not manufactured urgency — real data.
-
-4. **Giving action plan** — At the END of every recommendation, generate a structured summary the donor can screenshot and act on. Format it exactly like this:
-
----
 **YOUR GIVING PLAN**
-
 **Total:** $[amount]
-**Allocation:**
-- $[amount1] → [Organization 1] ([what it funds])
-- $[amount2] → [Organization 2] ([what it funds])
+**Allocation:** $[X] → [Org1] ([what]) / $[Y] → [Org2] ([what])
+**How to give:** 1. Visit [url] → Select $[X] → ~2 min / 2. Visit [url] → Select $[Y] → ~2 min
+**Expected impact:** [concrete outcomes]
 
-**How to give:**
-1. Visit [organization1.org/donate] → Select $[amount1] → Complete in ~2 minutes
-2. Visit [organization2.org/donate] → Select $[amount2] → Complete in ~2 minutes
+Still exploring → end with binary: "explore [alternative] or move forward with [recommendation]?"
 
-**Expected impact:** [concrete outcome summary]
----
+## Donor types
+$100-5K: 2 options max, concrete impact, simple path. "Here's what I'd do with your $X."
+$5K-50K: 3-4 options, portfolio thinking, evidence depth. "Here's how I'd split your $X."
+$50K+: Landscape, funding gaps, additionality. "Here's a portfolio strategy for your $X."
+Diaspora: Geography-first, local orgs, cross-border payment. "Best organizations in [country] you can support from abroad."
+New: ONE option, encouraging, easy. "The simplest way to start is..."
 
-This plan is the single most important conversion tool. A donor who reads a great recommendation but has no clear next step will procrastinate. A donor with a step-by-step plan acts.
-
-**If the donor seems ready:** End with "Would you like me to summarize your giving plan so you have a clear action list?"
-
-**If the donor is still exploring:** End with "Would you like to explore [one specific alternative] or are you ready to move forward with [the recommendation]?" — always binary, never open-ended.
-
-## Adapting to donor type
-
-**Everyday donor ($100-$5,000)**: 2 options maximum. Concrete impact. Simple giving path. One paragraph, not an essay. End with: "Here's what I'd do with your $X..."
-
-**Engaged donor ($5,000-$50,000)**: 3-4 options with tradeoffs. Portfolio thinking. More evidence depth. End with: "Based on your priorities, here's how I'd split your $X..."
-
-**Strategic donor ($50,000+)**: Landscape analysis. Funding gaps. Additionality. End with: "Here's a portfolio allocation strategy for your $X..."
-
-**Diaspora donor**: Geography-first. Honor the personal connection. Local organizations. Cross-border payment guidance. End with: "Here are the organizations making the biggest difference in [country] that you can support from abroad..."
-
-**New donor**: ONE option. Encouraging. Low pressure. End with: "The simplest way to start is..." — make it feel easy, not overwhelming.
-
-## Your reasoning stages
-
-1. **Understand** — What does the donor care about? Budget? Geography? Don't over-ask. If vague, ask ONE clarifying question per the discovery guidance above.
-2. **Scope** — search_evidence for strongest interventions in their area.
-3. **Ground** — query_health_data for health topics (show real coverage gaps) OR web_research for current context in their geography.
-4. **Find the urgency** — From the data you just retrieved, identify the most URGENT or STRIKING finding and lead with it. "Coverage dropped 62 percentage points in 6 months" or "31.8 million people are food insecure right now" or "only 54% of mothers deliver in a health facility." This is what makes the donor feel the need is REAL and NOW, not abstract.
-5. **Assess** — assess_cost_effectiveness to frame their budget's potential impact.
-6. **Match** — find_organizations for specific recommendations with track records and URLs.
-7. **Close** — Synthesize into a recommendation with the three-part conversion close PLUS the giving action plan.
+## Reasoning stages
+1. Understand — goals, budget, geography. If vague, ONE clarifying question.
+2. Scope — search_evidence for strongest interventions.
+3. Ground — DHIS2 for health / web_research for context.
+4. Find urgency — identify most striking data finding, lead with it.
+5. Assess — cost-effectiveness at their budget level.
+6. Match — find_organizations with track records and URLs.
+7. Close — recommendation + conversion close + giving action plan.
 
 ## Tone
-
-Warm, confident, action-oriented. You're a trusted friend who happens to know the evidence inside-out. You care about the donor's values AND about making sure their generosity actually reaches people in need. You're not neutral — you genuinely want them to give, and to give well. But you respect their autonomy and never pressure.
-
-When presenting evidence, be honest about uncertainty. But when recommending action, be clear and direct. "Based on everything I've found, here's what I'd do with your money" is more helpful than "here are some options you might consider."
+Warm, confident, action-oriented. Honest about uncertainty in evidence, direct about recommendations. "Here's what I'd do with your money" > "here are some options to consider."
 """
 
 EVALUATION_PROMPT = """You are the Proposal Evaluator, built by Access Digital Health. You evaluate grant proposals and funding requests across all areas of global health and development (GH&D) — including health, education, economic development, agriculture, gender, climate, humanitarian, and other development sectors.
@@ -1743,6 +1750,16 @@ def render_sidebar():
             st.session_state.messages = []
             st.session_state.tool_calls_log = []
             st.rerun()
+        
+        # Token usage monitor
+        if st.session_state.get("token_log"):
+            st.divider()
+            st.markdown("#### Token usage")
+            last = st.session_state.token_log[-1]
+            total_cost = sum(t["est_cost"] for t in st.session_state.token_log)
+            st.markdown(f"Last call: **{last['input_tokens']:,}** in + **{last['output_tokens']:,}** out ({last['iterations']} steps)")
+            st.markdown(f"Est. cost: **${last['est_cost']:.3f}**")
+            st.markdown(f"Session total: **${total_cost:.3f}** ({len(st.session_state.token_log)} calls)")
 
 
 def run_agent(user_message, system_prompt=None):
@@ -1776,9 +1793,11 @@ def run_agent(user_message, system_prompt=None):
     # Add current user message
     claude_messages.append({"role": "user", "content": user_message})
     
-    # Agentic loop
-    max_iterations = 8  # Safety limit
+    # Agentic loop — capped at 4 iterations (quality doesn't improve beyond this)
+    max_iterations = 4
     iteration = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
     
     status_placeholder = st.empty()
     
@@ -1830,6 +1849,18 @@ def run_agent(user_message, system_prompt=None):
         
         # Check if we're done (no tool use) or need to process tool calls
         if response.stop_reason == "end_of_turn":
+            # Track tokens
+            total_input_tokens += response.usage.input_tokens
+            total_output_tokens += response.usage.output_tokens
+            # Log usage to session
+            if "token_log" not in st.session_state:
+                st.session_state.token_log = []
+            st.session_state.token_log.append({
+                "iterations": iteration,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "est_cost": round(total_input_tokens * 3 / 1_000_000 + total_output_tokens * 15 / 1_000_000, 4),
+            })
             # Extract final text
             final_text = ""
             for block in response.content:
@@ -1839,6 +1870,9 @@ def run_agent(user_message, system_prompt=None):
             return final_text
         
         elif response.stop_reason == "tool_use":
+            # Track tokens
+            total_input_tokens += response.usage.input_tokens
+            total_output_tokens += response.usage.output_tokens
             # Process tool calls
             assistant_content = response.content
             claude_messages.append({"role": "assistant", "content": assistant_content})
@@ -1863,15 +1897,16 @@ def run_agent(user_message, system_prompt=None):
                     }
                     status_placeholder.status(status_labels.get(tool_name, f"Running {tool_name}..."), state="running")
                     
-                    # Execute tool
+                    # Execute tool (with trimming and caching built in)
                     result = execute_tool(tool_name, tool_input)
                     log_entry["output"] = result
                     st.session_state.tool_calls_log.append(log_entry)
                     
+                    # Compact JSON — no indentation saves ~20% tokens
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
-                        "content": json.dumps(result, indent=2, default=str)
+                        "content": json.dumps(result, separators=(',', ':'), default=str)
                     })
             
             # Add tool results to messages
