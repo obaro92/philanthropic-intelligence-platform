@@ -1246,32 +1246,37 @@ def find_organizations(health_area, geography_preference=None):
 
 
 def web_research(query, purpose):
-    """Conduct web research using Claude with web search."""
+    """Conduct web research using Claude Haiku (cheaper — this is retrieval, not reasoning)."""
     try:
         client = anthropic.Anthropic(api_key=st.session_state.get("api_key", ""))
         response = client.messages.create(
-            model=MODEL,
-            max_tokens=1500,
+            model="claude-haiku-4-5-20251001",  # Haiku for web retrieval — 12x cheaper than Sonnet
+            max_tokens=1000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{
                 "role": "user",
-                "content": f"Research the following for a philanthropic advisor helping donors make giving decisions: {query}\n\nPurpose: {purpose}\n\nProvide a concise summary of the most relevant, recent findings. Focus on facts, data, and actionable insights."
+                "content": f"Research: {query}\nPurpose: {purpose}\nProvide a concise factual summary with key data points. Focus on recent data and actionable facts."
             }]
         )
+        
+        # Track hidden tokens from this sub-call
+        if "token_log" not in st.session_state:
+            st.session_state.token_log = []
+        web_cost = round(response.usage.input_tokens * 0.8 / 1_000_000 + response.usage.output_tokens * 4 / 1_000_000, 4)
+        if st.session_state.token_log:
+            st.session_state.token_log[-1]["est_cost"] = round(st.session_state.token_log[-1].get("est_cost", 0) + web_cost, 4)
+            st.session_state.token_log[-1]["web_research_tokens"] = response.usage.input_tokens + response.usage.output_tokens
         
         # Extract text from response
         text_parts = [block.text for block in response.content if hasattr(block, 'text')]
         return {
             "source": "Live web research",
-            "query": query,
-            "findings": " ".join(text_parts) if text_parts else "Research completed but no text summary generated.",
-            "note": f"Research purpose: {purpose}"
+            "findings": " ".join(text_parts)[:2000] if text_parts else "No results found.",
         }
     except Exception as e:
         return {
             "source": "Web research (unavailable)",
-            "error": str(e),
-            "note": "Web research is currently unavailable. The agent will rely on its curated evidence base and general knowledge."
+            "error": str(e)[:200],
         }
 
 
@@ -1313,14 +1318,47 @@ def _trim_tool_result(tool_name, result):
     return result
 
 
+def _normalize_cache_input(text):
+    """Extract core keywords for consistent cache keys regardless of Claude's phrasing."""
+    text = text.lower().strip()
+    # Map common variations to canonical terms
+    normalizations = {
+        "malaria prevention": "malaria", "malaria bed nets": "malaria", "bed nets": "malaria",
+        "insecticide treated nets": "malaria", "itn": "malaria", "smc": "malaria",
+        "girls education": "girls_education", "girl education": "girls_education",
+        "girls' education": "girls_education", "female education": "girls_education",
+        "maternal health": "maternal_health", "maternal mortality": "maternal_health",
+        "mother health": "maternal_health", "skilled birth": "maternal_health",
+        "child immunization": "immunization", "childhood immunization": "immunization",
+        "vaccination": "immunization", "vaccines": "immunization",
+        "cash transfer": "cash_transfers", "cash transfers": "cash_transfers",
+        "direct cash": "cash_transfers", "unconditional cash": "cash_transfers",
+        "food security": "agriculture", "smallholder": "agriculture",
+        "humanitarian cash": "humanitarian", "refugee": "humanitarian",
+        "climate adaptation": "climate", "climate resilience": "climate",
+    }
+    for phrase, canonical in normalizations.items():
+        if phrase in text:
+            return canonical
+    # Fallback: use first meaningful word
+    for word in text.split():
+        if len(word) > 3 and word not in ("health", "global", "development", "intervention", "area"):
+            return word
+    return text.replace(" ", "_")[:30]
+
+
 def execute_tool(tool_name, tool_input):
     """Execute a tool, check cache, trim results, and cache successful results."""
     
-    # Cache check for local tools (not web_research — that needs to be fresh)
-    if tool_name in ("search_evidence", "assess_cost_effectiveness", "find_organizations") and "db" in st.session_state:
+    # Build normalized cache key
+    raw_area = str(tool_input.get("health_area", tool_input.get("intervention_area", tool_input.get("query", ""))))
+    normalized = _normalize_cache_input(raw_area)
+    geo = str(tool_input.get("geography_preference", tool_input.get("geography", "global")))
+    
+    # Cache check for all tools except first-time web research
+    if "db" in st.session_state:
         db = st.session_state.db
-        cache_key = db.make_cache_key(tool_name, str(tool_input.get("health_area", tool_input.get("intervention_area", ""))), 
-                                       str(tool_input.get("geography_preference", "global")))
+        cache_key = db.make_cache_key(tool_name, normalized, geo)
         cached = db.get_cached_data(cache_key)
         if cached:
             cached["_cached"] = True
@@ -1343,12 +1381,11 @@ def execute_tool(tool_name, tool_input):
     # Trim the result before sending to Claude
     result = _trim_tool_result(tool_name, result)
     
-    # Cache local tool results (evidence: 7 days, orgs: 7 days)
-    if tool_name in ("search_evidence", "assess_cost_effectiveness", "find_organizations") and "db" in st.session_state:
-        ttl = 168  # 7 days in hours
+    # Cache ALL tool results (including web_research)
+    if "db" in st.session_state:
         db = st.session_state.db
-        cache_key = db.make_cache_key(tool_name, str(tool_input.get("health_area", tool_input.get("intervention_area", ""))),
-                                       str(tool_input.get("geography_preference", "global")))
+        cache_key = db.make_cache_key(tool_name, normalized, geo)
+        ttl = {"query_health_data": 24, "web_research": 6}.get(tool_name, 168)  # DHIS2: 24hr, web: 6hr, others: 7 days
         db.set_cached_data(cache_key, result, source=tool_name, ttl_hours=ttl)
     
     return result
@@ -1762,7 +1799,7 @@ def render_sidebar():
             st.markdown(f"Session total: **${total_cost:.3f}** ({len(st.session_state.token_log)} calls)")
 
 
-def run_agent(user_message, system_prompt=None):
+def run_agent(user_message, system_prompt=None, max_iterations=4):
     """Run the agentic loop with tool use."""
     
     if not st.session_state.api_key:
@@ -1793,8 +1830,7 @@ def run_agent(user_message, system_prompt=None):
     # Add current user message
     claude_messages.append({"role": "user", "content": user_message})
     
-    # Agentic loop — capped at 4 iterations (quality doesn't improve beyond this)
-    max_iterations = 4
+    # Agentic loop — iteration cap varies by mode
     iteration = 0
     total_input_tokens = 0
     total_output_tokens = 0
@@ -2340,7 +2376,7 @@ Use your tools to verify health data, check evidence, benchmark costs, and ident
         agentic_success = False
         try:
             status = st.status("🤖 Agentic evaluation (full tool use)...", state="running")
-            response = run_agent(eval_message, EVALUATION_PROMPT)
+            response = run_agent(eval_message, EVALUATION_PROMPT, max_iterations=6)
             if response and "rate_limit" not in response.lower() and "Error" not in response[:20]:
                 status.update(label="Agentic evaluation complete", state="complete")
                 st.session_state.eval_result = response
@@ -2697,7 +2733,7 @@ Provide a structured analysis:
             full_message = f"{portfolio_context}\n\nPROGRAM OFFICER'S QUESTION: {st.session_state.messages[-1]['content']}"
             
             with st.chat_message("assistant"):
-                response = run_agent(full_message, PORTFOLIO_PROMPT)
+                response = run_agent(full_message, PORTFOLIO_PROMPT, max_iterations=5)
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
                 # Save conversation to database
