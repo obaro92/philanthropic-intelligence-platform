@@ -1,0 +1,32 @@
+[theme]
+primaryColor = "#2B5A8C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#1E1E1E"
+font = "sans serif"
+
+[server]
+maxUploadSize = 10
+enableCORS = false
+
+[browser]
+gatherUsageStats = false
+```
+
+5. Click **Commit changes** → **Commit changes** again in the popup
+
+For `sql/schema.sql`:
+1. Click **Add file** → **Create new file**
+2. In the filename box, type: `sql/schema.sql`
+3. Paste the entire contents of your `schema.sql` file
+4. Click **Commit changes** → **Commit changes**
+
+**That's it — your repository is ready.** You should see all your files listed on the repository page:
+```
+.streamlit/config.toml
+sql/schema.sql
+.gitignore
+README.md
+app.py
+db.py
+requirements.txt
