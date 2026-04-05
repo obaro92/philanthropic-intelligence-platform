@@ -2525,15 +2525,21 @@ def render_portfolio_mode():
                     org = st.text_input("Grantee organization", key=f"pf_org_{i}", value=existing.get("org", ""), placeholder="e.g., Against Malaria Foundation")
                     geo = st.text_input("Geography", key=f"pf_geo_{i}", value=existing.get("geography", ""), placeholder="e.g., Bo District, Sierra Leone")
                 with col2:
-                    sector = st.selectbox("Sector", key=f"pf_sector_{i}",
-                        options=["Health - Malaria", "Health - Maternal & Child", "Health - Immunization", "Health - HIV/TB",
+                    sector_options = ["Health - Malaria", "Health - Maternal & Child", "Health - Immunization", "Health - HIV/TB",
                                  "Health - Nutrition", "Health - Other", "Education", "Agriculture & Food Security",
-                                 "Economic Development", "Gender & GBV", "Humanitarian", "Climate & Environment", "WASH", "Other"],
-                        index=0)
+                                 "Economic Development", "Gender & GBV", "Humanitarian", "Climate & Environment", "WASH", "Other"]
+                    saved_sector = existing.get("sector", "Health - Malaria")
+                    sector_idx = sector_options.index(saved_sector) if saved_sector in sector_options else 0
+                    sector = st.selectbox("Sector", key=f"pf_sector_{i}",
+                        options=sector_options,
+                        index=sector_idx)
                     budget = st.text_input("Grant amount", key=f"pf_budget_{i}", value=existing.get("budget", ""), placeholder="e.g., $150,000")
+                    status_options = ["Active - On track", "Active - Needs attention", "Active - Behind schedule", "Closing", "Pipeline"]
+                    saved_status = existing.get("status", "Active - On track")
+                    status_idx = status_options.index(saved_status) if saved_status in status_options else 0
                     status = st.selectbox("Status", key=f"pf_status_{i}",
-                        options=["Active - On track", "Active - Needs attention", "Active - Behind schedule", "Closing", "Pipeline"],
-                        index=0)
+                        options=status_options,
+                        index=status_idx)
                 
                 milestones = st.text_area("Key milestones & dates", key=f"pf_miles_{i}", value=existing.get("milestones", ""),
                     placeholder="e.g., M3: Baseline survey complete\nM6: CHW training done\nM9: Mid-term evaluation\nM12: Endline + final report",
