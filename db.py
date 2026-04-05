@@ -75,7 +75,7 @@ class Database:
         """Update donor's giving profile (causes, budget, geography, philosophy)."""
         if self.connected:
             try:
-                self.client.table("users").update({"giving_profile": json.dumps(profile)}).eq("id", user_id).execute()
+                self.client.table("users").update({"giving_profile": profile}).eq("id", user_id).execute()
                 return True
             except Exception as e:
                 print(f"DB error (update_giving_profile): {e}")
@@ -88,7 +88,9 @@ class Database:
                 result = self.client.table("users").select("giving_profile").eq("id", user_id).execute()
                 if result.data and result.data[0].get("giving_profile"):
                     profile = result.data[0]["giving_profile"]
-                    return json.loads(profile) if isinstance(profile, str) else profile
+                    if isinstance(profile, str):
+                        return json.loads(profile)
+                    return profile
             except Exception as e:
                 print(f"DB error (get_giving_profile): {e}")
         return {}
@@ -103,9 +105,22 @@ class Database:
             try:
                 # Delete existing grants for this user
                 self.client.table("portfolio_grants").delete().eq("user_id", user_id).execute()
-                # Insert new grants
+                # Insert new grants — map UI field names to database columns
                 if grants:
-                    rows = [{**g, "user_id": user_id} for g in grants]
+                    rows = []
+                    for g in grants:
+                        rows.append({
+                            "user_id": user_id,
+                            "name": g.get("name", ""),
+                            "organization": g.get("org", g.get("organization", "")),
+                            "geography": g.get("geography", ""),
+                            "sector": g.get("sector", ""),
+                            "sector_code": g.get("sector_code", ""),
+                            "budget": g.get("budget", ""),
+                            "status": g.get("status", "Active - On track"),
+                            "milestones": g.get("milestones", ""),
+                            "notes": g.get("notes", ""),
+                        })
                     self.client.table("portfolio_grants").insert(rows).execute()
                 return True
             except Exception as e:
@@ -120,7 +135,24 @@ class Database:
         if self.connected:
             try:
                 result = self.client.table("portfolio_grants").select("*").eq("user_id", user_id).order("created_at").execute()
-                return result.data or []
+                if result.data:
+                    # Map database column names back to UI field names
+                    grants = []
+                    for row in result.data:
+                        grants.append({
+                            "id": row.get("id", ""),
+                            "name": row.get("name", ""),
+                            "org": row.get("organization", ""),
+                            "geography": row.get("geography", ""),
+                            "sector": row.get("sector", ""),
+                            "sector_code": row.get("sector_code", ""),
+                            "budget": row.get("budget", ""),
+                            "status": row.get("status", ""),
+                            "milestones": row.get("milestones", ""),
+                            "notes": row.get("notes", ""),
+                        })
+                    return grants
+                return []
             except Exception as e:
                 print(f"DB error (load_portfolio): {e}")
         
@@ -140,6 +172,18 @@ class Database:
     # EVALUATION STORAGE
     # ══════════════════════════════════════════
     
+    @staticmethod
+    def _clean_for_json(obj):
+        """Recursively convert non-serializable objects to strings for JSONB storage."""
+        if isinstance(obj, dict):
+            return {k: Database._clean_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [Database._clean_for_json(v) for v in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            return str(obj)
+    
     def save_evaluation(self, user_id: str, proposal_name: str, proposal_text: str,
                         sector: str, geography: str, recommendation: str,
                         evaluation_text: str, tool_calls: list = None) -> bool:
@@ -152,7 +196,7 @@ class Database:
             "geography": geography,
             "recommendation": recommendation,
             "evaluation_text": evaluation_text,
-            "tool_calls": json.dumps(tool_calls or []),
+            "tool_calls": self._clean_for_json(tool_calls or []),
         }
         if self.connected:
             try:
@@ -189,11 +233,13 @@ class Database:
         """Store a grantee report analysis."""
         record = {
             "user_id": user_id,
-            "grant_id": grant_id,
             "grant_name": grant_name,
             "report_text": report_text[:3000],
             "analysis_text": analysis_text,
         }
+        # Only include grant_id if it's a valid non-empty value
+        if grant_id and grant_id != "":
+            record["grant_id"] = grant_id
         if self.connected:
             try:
                 self.client.table("report_analyses").insert(record).execute()
@@ -238,9 +284,11 @@ class Database:
                         title = msg["content"][:80]
                         break
                 
+                clean_messages = self._clean_for_json(messages)
+                
                 if conversation_id:
                     self.client.table("conversations").update({
-                        "messages": json.dumps(messages),
+                        "messages": clean_messages,
                         "title": title,
                     }).eq("id", conversation_id).execute()
                     return conversation_id
@@ -249,7 +297,7 @@ class Database:
                         "user_id": user_id,
                         "mode": mode,
                         "title": title,
-                        "messages": json.dumps(messages),
+                        "messages": clean_messages,
                     }).execute()
                     return result.data[0]["id"] if result.data else None
             except Exception as e:
@@ -337,10 +385,10 @@ class Database:
         
         if self.connected:
             try:
-                # Upsert (insert or update on conflict)
+                clean_data = self._clean_for_json(data)
                 self.client.table("data_cache").upsert({
                     "cache_key": cache_key,
-                    "data": json.dumps(data, default=str),
+                    "data": clean_data,
                     "source": source,
                     "ttl_hours": ttl_hours,
                     "expires_at": expires,
@@ -368,7 +416,7 @@ class Database:
             "user_id": user_id,
             "period": period,
             "report_text": report_text,
-            "portfolio_snapshot": json.dumps(portfolio_snapshot, default=str),
+            "portfolio_snapshot": self._clean_for_json(portfolio_snapshot),
         }
         if self.connected:
             try:
